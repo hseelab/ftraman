@@ -1,6 +1,5 @@
 import numpy as np
 import tkinter as tk
-import matplotlib as mpl
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from matplotlib.ticker import AutoMinorLocator
@@ -11,23 +10,28 @@ from time import sleep
 from cameras import DummyCamera, TCE1304U, SK2048U3HW
 
 
-mpl.style.use('dark_background')
-mpl.rcParams['path.simplify'] = True
-mpl.rcParams['figure.constrained_layout.use'] = True
-mpl.rcParams['text.color'] = '#AAA'
-mpl.rcParams['axes.edgecolor'] = '#AAA'
-mpl.rcParams['axes.labelcolor'] = '#AAA'
-mpl.rcParams['xtick.color'] = '#AAA'
-mpl.rcParams['ytick.color'] = '#AAA'
-mpl.rcParams['grid.color'] = '#222'
-mpl.rcParams['agg.path.chunksize'] = 10000
-mpl.rcParams['figure.figsize'] = (16, 9.6)
+plt.style.use('dark_background')
+plt.rcParams['path.simplify'] = True
+plt.rcParams['figure.constrained_layout.use'] = True
+plt.rcParams['text.color'] = '#AAA'
+plt.rcParams['axes.edgecolor'] = '#AAA'
+plt.rcParams['axes.labelcolor'] = '#AAA'
+plt.rcParams['xtick.color'] = '#AAA'
+plt.rcParams['ytick.color'] = '#AAA'
+plt.rcParams['grid.color'] = '#222'
+plt.rcParams['agg.path.chunksize'] = 10000
+plt.rcParams['figure.figsize'] = (14, 6)
 
 
 class Tk(tk.Tk):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.geometry('1600x993+0+0')
+        self.config(bg='#222')
+
+class Frame(tk.Frame):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         self.config(bg='#222')
 
 class Label(tk.Label):
@@ -97,6 +101,9 @@ class Updater(Thread):
                 continue
 
             camera = self.camera
+            if not camera:
+                continue
+
             data = self.camera.get_line()
 
             if counter >= len(self.raw_data):
@@ -150,7 +157,7 @@ class Spectrum(FigureCanvasTkAgg):
         self.ax3.xaxis.tick_top()
         self.ax3.xaxis.set_label_position('top') 
         self.ax4 = self.ax3.secondary_xaxis('bottom', functions=(self._invraman, self._raman))
-        self.ax4.set_xticks(np.arange(400, 800, 5))
+        self.ax4.set_xticks(np.arange(400, 1001, 5))
         self.ax4.xaxis.set_minor_locator(AutoMinorLocator())
 
         self.line1, = self.ax1.plot((  -15,    15), (0, 0), linewidth=0.5, color='#0F4', animated=True)
@@ -178,6 +185,7 @@ class Spectrum(FigureCanvasTkAgg):
 
         self.draw()
         self.background = self.copy_from_bbox(self.figure.bbox)
+        self.reset_required = False
 
     def set_ydata(self, y1, y2):
         self.restore_region(self.background)
@@ -213,20 +221,22 @@ class MainWindow(Tk):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.title('Fourier Transform Raman Spectroscopy')
-        self.protocol("WM_DELETE_WINDOW", self.quit)
+        self.bind('<Configure>', self.resize)
+        self.protocol('WM_DELETE_WINDOW', self.quit)
 
         self.updater = Updater()
         self.spectrum = Spectrum(Figure(), self)
+        self.controls = Frame(self)
 
         self.camera_type = tk.StringVar(self)
         self.accum_count = tk.IntVar(self, 1)
         self.exposure_time = tk.DoubleVar(self, 10)
         self.spectrum_center = tk.IntVar(self, self.spectrum.center)
 
-        self.camera_type_widget = OptionMenu(self, self.camera_type, *self.updater.cameras.keys())
-        self.accum_count_widget = Entry(self, textvariable=self.accum_count)
-        self.exposure_time_widget = Entry(self, textvariable=self.exposure_time)
-        self.spectrum_center_widget = Entry(self, textvariable=self.spectrum_center)
+        self.camera_type_widget = OptionMenu(self.controls, self.camera_type, *self.updater.cameras.keys())
+        self.accum_count_widget = Entry(self.controls, textvariable=self.accum_count)
+        self.exposure_time_widget = Entry(self.controls, textvariable=self.exposure_time)
+        self.spectrum_center_widget = Entry(self.controls, textvariable=self.spectrum_center)
 
         self.camera_type.trace('w', self.select_camera)
         self.accum_count_widget.bind('<Return>', self.set_accum_count)
@@ -234,23 +244,25 @@ class MainWindow(Tk):
         self.spectrum_center_widget.bind('<Return>', self.set_spectrum_center)
         self.updater.start()
 
-        self.spectrum.get_tk_widget().pack(fill='both')
-        Label(self, text='  Camera Type:').pack(side='left')
+        self.spectrum.get_tk_widget().pack(fill='both', expand=True)
+        self.controls.pack(fill='x')
+
+        Label(self.controls, text='  Camera Type:').pack(side='left')
         self.camera_type_widget.pack(side='left')
-        Label(self, text=',  Accumulation=').pack(side='left')
+        Label(self.controls, text=',  Accumulation=').pack(side='left')
         self.accum_count_widget.pack(side='left')
-        Label(self, text=',  Exposure Time=').pack(side='left')
+        Label(self.controls, text=',  Exposure Time=').pack(side='left')
         self.exposure_time_widget.pack(side='left')
-        Label(self, text='ms,    Reyleigh λ=').pack(side='left')
+        Label(self.controls, text='ms,    Reyleigh λ=').pack(side='left')
         self.spectrum_center_widget.pack(side='left')
-        Label(self, text='nm').pack(side='left')
+        Label(self.controls, text='nm').pack(side='left')
 
         self.button = []
-        self.button.append(Button(self, text='Auto scale', command=self.spectrum.auto_scale))
-        self.button.append(Button(self, text='Pause', command=self.pause_camera))
-        self.button.append(Button(self, text='Save as...', command=self.save_plot))
+        self.button.append(Button(self.controls, text='Auto scale', command=self.spectrum.auto_scale))
+        self.button.append(Button(self.controls, text='Pause', command=self.pause_camera))
+        self.button.append(Button(self.controls, text='Save as...', command=self.save_plot))
         for b in reversed(self.button):
-            b.pack(padx=2, side='right')
+            b.pack(padx=1, pady=0, side='right')
 
     def set_accum_count(self, *args):
         try:
@@ -284,6 +296,8 @@ class MainWindow(Tk):
     def pause_camera(self):
         if self.updater.camera:
             if self.updater.paused:
+                if self.spectrum.reset_required:
+                    self.spectrum.set_xaxis(self.spectrum_center.get())
                 self.updater.paused = False
                 self.button[1]['text'] = 'Pause'
             else:
@@ -292,6 +306,7 @@ class MainWindow(Tk):
 
     def save_plot(self):
         self.updater.paused = True
+        self.button[1]['text'] = 'Resume'
         filetypes = [('All files', '*.*'), ('CSV data files', '*.csv'), ('PNG image files', '*.png')]
         filename = tk.filedialog.asksaveasfilename(defaultextension='.png', filetypes=filetypes)
         if filename:
@@ -303,8 +318,12 @@ class MainWindow(Tk):
                 with open(filename, 'w') as f:
                     f.write(data)
                     f.close()
-        if self.button[1]['text'] != 'Pause':
-            self.updater.paused = False
+    
+    def resize(self, *args):
+        self.spectrum.reset_required = True
+        if not self.updater.paused:
+            self.updater.paused = True
+            self.button[1]['text'] = 'Resume'
 
     def quit(self):
         self.updater.running = False
@@ -316,6 +335,4 @@ class MainWindow(Tk):
 
 
 if __name__ == '__main__':
-    root = MainWindow()
-    root.resizable(False, False)
-    root.mainloop()
+    MainWindow().mainloop()
