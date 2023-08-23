@@ -17,7 +17,7 @@ class DummyCamera(object):
 
     def set_dummy_signal(self, *peaks, width=0.5):
         self._gamma = 2 * np.sqrt(np.log(2)) / (width * (self.d * self.n))
-        self._peaks = [(a/2, 400*np.pi/(self.d*l)) for l, a in peaks]
+        self._peaks = [(a/2, 500*np.pi/(self.d*l)) for l, a in peaks]
 
     def get_line(self):
         sleep(0.001 * self.exposure_time)

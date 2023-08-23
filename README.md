@@ -1,2 +1,1 @@
-# Fourier-Transform Raman Spectroscopy
-Fourier-Transform Raman Spectroscopy
+Multi-Channel Fourier-Transform Raman Spectrometer

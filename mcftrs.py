@@ -5,9 +5,9 @@ from matplotlib.figure import Figure
 from matplotlib.ticker import AutoMinorLocator
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from threading import Thread
-from scipy.fft import fft
-from time import sleep
-from cameras import DummyCamera, TCE1304U, SK2048U3HW
+from scipy import fft
+from time import sleep, perf_counter
+from camera import DummyCamera, TCE1304U, SK2048U3HW
 
 
 plt.style.use('dark_background')
@@ -69,7 +69,7 @@ class Updater(Thread):
         self.cameras['10680x3um'] = DummyCamera(10680, 2.625)
 
         for c in self.cameras.values():
-            c.set_dummy_signal((531, 0.2), (532, 0.4), (533, 0.4))
+            c.set_dummy_signal((520, 0.2), (532, 0.5), (544, 0.3))
 
         try: self.cameras['TCE-1304-U'] = TCE1304U()
         except: pass
@@ -86,33 +86,36 @@ class Updater(Thread):
         self.camera = self.cameras.get(camera)
         self.camera.set_exposure_time(exposure_time)
 
-    def set_accum_count(self, accum_count, extended_pixel):
-        self._min = extended_pixel>>6
-        self._max = extended_pixel>>1
-        self.raw_data = np.zeros((accum_count, extended_pixel))
-        self.fft_data = np.zeros((accum_count, extended_pixel))
+    def set_accum_count(self, accum_count, spectrum):
+        self._min = spectrum._min
+        self._max = spectrum._max
+        self.raw_data = np.zeros((accum_count, 2*self._max))
+        self.fft_data = np.zeros((accum_count, 2*self._max))
+
+    def get_line(self):
+        data = self.camera.get_line()
+        data_fft = fft.rfft(data)
+        data_fft[:self._min] = np.zeros(self._min)
+        data_ifft = np.real(fft.irfft(data_fft))
+        return data_ifft
 
     def run(self):
         counter = 0
 
         while self.running:
-            if self.paused:
+            camera = self.camera
+            if self.paused or not camera:
                 sleep(0.01)
                 continue
 
-            camera = self.camera
-            if not camera:
-                continue
-
             data = self.camera.get_line()
-
             if counter >= len(self.raw_data):
                 counter = 0
 
             if camera == self.camera:
-                self.raw_data[counter,:self.camera.n] = data
-                self.fft_data[counter] = 10 * np.abs(fft(self.raw_data[counter]) / self.camera.n)
-                y1 = np.average(self.raw_data, axis=0)[:self.camera.n]
+                self.raw_data[counter,:len(data)] = data
+                self.fft_data[counter] = 10 * np.abs(fft.fft(self.raw_data[counter]) / len(data))
+                y1 = np.average(self.raw_data, axis=0)[:len(data)]
                 y2 = np.average(self.fft_data, axis=0)[self._min:self._max]
                 self.handler(y1, y2)
                 counter += 1
@@ -127,7 +130,8 @@ class Spectrum(FigureCanvasTkAgg):
         super().__init__(*args, **kwargs)
 
         self.center = 532
-        self.pixels = 2**16
+        self._min = 1<<5
+        self._max = 1<<15
 
         self.ax1 = self.figure.add_subplot(313)
         self.ax2 = self.figure.add_subplot(312)
@@ -143,13 +147,13 @@ class Spectrum(FigureCanvasTkAgg):
         self.ax2.grid()
         self.ax2.set_xscale('function', functions=(self._inv, self._inv))
         self.ax2.set_xticks(1/np.linspace(1/400, 1/12000, 30))
-        self.ax2.set_xlim(12000, 400)
+        self.ax2.set_xlim(12000, 500)
         self.ax2.set_ylim(-0.01, 1.01)
         self.ax2.ticklabel_format(axis='y', style='sci', scilimits=(0,0))
 
         self.ax3.grid()
-        self.ax3.set_xticks(np.arange(-1500, 1501, 100))
-        self.ax3.set_xlim(-1500, 1500)
+        self.ax3.set_xticks(np.arange(-700, 701, 50))
+        self.ax3.set_xlim(-700, 700)
         self.ax3.set_ylim(-0.01, 1.01)
         self.ax3.ticklabel_format(axis='y', style='sci', scilimits=(0,0))
         self.ax3.set_xlabel('Raman Shift (cm⁻¹)')    
@@ -157,12 +161,12 @@ class Spectrum(FigureCanvasTkAgg):
         self.ax3.xaxis.tick_top()
         self.ax3.xaxis.set_label_position('top') 
         self.ax4 = self.ax3.secondary_xaxis('bottom', functions=(self._invraman, self._raman))
-        self.ax4.set_xticks(np.arange(400, 1001, 5))
+        self.ax4.set_xticks(np.arange(500, 1001, 2))
         self.ax4.xaxis.set_minor_locator(AutoMinorLocator())
 
-        self.line1, = self.ax1.plot((  -15,    15), (0, 0), linewidth=0.5, color='#0F4', animated=True)
-        self.line2, = self.ax2.plot((  400, 12000), (0, 0), linewidth=0.5, color='#F80', animated=True)
-        self.line3, = self.ax3.plot((-3000,  3000), (0, 0), linewidth=0.5, color='#F80', animated=True)
+        self.line1, = self.ax1.plot((  -15,   15), (0, 0), linewidth=0.5, color='#0F4', animated=True)
+        self.line2, = self.ax2.plot((  500,  1e7), (0, 0), linewidth=0.5, color='#F80', animated=True)
+        self.line3, = self.ax3.plot((-3000, 3000), (0, 0), linewidth=0.5, color='#F80', animated=True)
 
         self.ax1.add_line(self.line1)
         self.ax2.add_line(self.line2)
@@ -178,7 +182,7 @@ class Spectrum(FigureCanvasTkAgg):
             self.line1.set_data(x1, np.zeros(len(x1)))
 
         self.center = center
-        x2 = 1/np.linspace(1/(200*self.pixels), 1/200, self.pixels)[(self.pixels>>6)-1:(self.pixels>>1)-1]
+        x2 = 1/np.linspace(2/(500*2*self._max), 2/500, self._max*2)[self._min-1:self._max-1]
         x3 = self._raman(x2)
         self.line2.set_data(x2, np.zeros(len(x2)))
         self.line3.set_data(x3, np.zeros(len(x3)))
@@ -201,7 +205,7 @@ class Spectrum(FigureCanvasTkAgg):
             self.blit(self.figure.bbox)
 
     def auto_scale(self):
-        ymax1 = min(max(1.3 * np.max(self.line1.get_ydata()), 1e-3), 1)
+        ymax1 = min(max(1.3 * np.max(np.abs(self.line1.get_ydata())), 1e-3), 1)
         ymax2 = max(1.3 * np.max(self.line2.get_ydata()), 1e-4)
 
         self.ax1.set_ylim(-0.01*ymax1, 1.01*ymax1)
@@ -249,11 +253,11 @@ class MainWindow(Tk):
 
         Label(self.controls, text='  Camera Type:').pack(side='left')
         self.camera_type_widget.pack(side='left')
-        Label(self.controls, text=',  Accumulation=').pack(side='left')
+        Label(self.controls, text=',  Accumulation =').pack(side='left')
         self.accum_count_widget.pack(side='left')
-        Label(self.controls, text=',  Exposure Time=').pack(side='left')
+        Label(self.controls, text=',  Exposure Time =').pack(side='left')
         self.exposure_time_widget.pack(side='left')
-        Label(self.controls, text='ms,    Reyleigh λ=').pack(side='left')
+        Label(self.controls, text='ms,    Reyleigh λ =').pack(side='left')
         self.spectrum_center_widget.pack(side='left')
         Label(self.controls, text='nm').pack(side='left')
 
@@ -261,6 +265,7 @@ class MainWindow(Tk):
         self.button.append(Button(self.controls, text='Auto scale', command=self.spectrum.auto_scale))
         self.button.append(Button(self.controls, text='Pause', command=self.pause_camera))
         self.button.append(Button(self.controls, text='Save as...', command=self.save_plot))
+        self.button.append(Button(self.controls, text='Quit', command=self.quit))
         for b in reversed(self.button):
             b.pack(padx=1, pady=0, side='right')
 
@@ -270,7 +275,7 @@ class MainWindow(Tk):
             camera = self.updater.cameras.get(self.camera_type.get())
             if accum_count > 0:
                 if camera != self.updater.camera or accum_count != len(self.updater.raw_data):
-                    self.updater.set_accum_count(self.accum_count.get(), self.spectrum.pixels)
+                    self.updater.set_accum_count(self.accum_count.get(), self.spectrum)
         except tk.TclError: pass
 
     def set_exposure_time(self, *args):
