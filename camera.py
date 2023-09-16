@@ -34,7 +34,7 @@ class DummyCam(Camera):
         self.pixel_pitch = pixel_pitch
         
     def __str__(self):
-        return f'<Camera: Dummy, Pixel: {self.pixel_count}, Pitch: {self.pixel_pitch}um>'
+        return f'<Camera: Dummy, {self.pixel_count}px, {self.pixel_pitch}um>'
 
     def get_frame(self):
         sleep(0.001 * self.exposure_time)
@@ -45,9 +45,9 @@ class DummyCam(Camera):
         y *= np.exp(-(x * self._gamma)**2)
         return np.minimum(1, (self.camera_gain * y + np.random.rand(self.pixel_count) - 0.5) / 100)
 
-    def set_dummy_signal(self, *peaks, width=0.5):
+    def set_dummy_signal(self, cutoff, *peaks, width=0.5):
         self._gamma = 2 * np.sqrt(np.log(2)) / (width * (self.pixel_pitch * self.pixel_count))
-        self._peaks = [(a/2, 500*np.pi/(self.pixel_pitch*l)) for l, a in peaks]
+        self._peaks = [(a/2, cutoff*np.pi/(self.pixel_pitch*l)) for a, l in peaks]
 
 
 class SK2048U3(Camera):
@@ -89,7 +89,7 @@ class SK2048U3(Camera):
         with self.lock:
             if camera_gain != self.camera_gain:
                 self.camera_gain = camera_gain
-                if self._dll.SK_SETGAIN(self._camera_id, camera_gain-1, self._channel):
+                if self._dll.SK_SETGAIN(self._camera_id, int(10.23*camera_gain), self._channel):
                     raise RuntimeError('Command write error! SK2048U3')
 
     def set_exposure_time(self, exposure_time):
@@ -170,13 +170,3 @@ class TCE1304U(Camera):
                 raise RuntimeError('Data read error! TCE1304U')
             dark_current = np.average(data[16:29])
             return (data[32:3680] - dark_current)/ 65536
-
-
-if __name__ == '__main__':
-    for Camera in [SK2048U3, TCE1304U]:
-        cam = Camera()
-        print('Camera detected:', cam)
-        cam.set_exposure_time(0.1)
-        data = cam.get_frame()
-        cam.close_camera()
-        print(f'pixel_count: {len(data)}')
