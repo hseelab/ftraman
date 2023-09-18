@@ -38,16 +38,15 @@ class DummyCam(Camera):
 
     def get_frame(self):
         sleep(0.001 * self.exposure_time)
-        x = self.pixel_pitch * (np.arange(-self.pixel_count//2, self.pixel_count//2) + np.random.rand(1)[0])
-        y = 0
+        x = self.pixel_pitch * (np.random.rand(1)[0] + np.arange(-self.pixel_count//2, self.pixel_count//2))
+        y = np.random.rand(self.pixel_count) - 0.5
         for a, k in self._peaks:
-            y += a * (1 + np.cos(k*x))
-        y *= np.exp(-(x * self._gamma)**2)
-        return np.minimum(1, (self.camera_gain * y + np.random.rand(self.pixel_count) - 0.5) / 100)
+            y += self.camera_gain * a * (1 + np.cos(k*x)) * np.exp(-x**2/self._sigma**2)
+        return np.minimum(1, y/100)
 
-    def set_dummy_signal(self, cutoff, *peaks, width=0.5):
-        self._gamma = 2 * np.sqrt(np.log(2)) / (width * (self.pixel_pitch * self.pixel_count))
-        self._peaks = [(a/2, cutoff*np.pi/(self.pixel_pitch*l)) for a, l in peaks]
+    def set_dummy_signal(self, cutoff, *peaks, fwhm=0.5):
+        self._sigma = fwhm * self.pixel_pitch * self.pixel_count / (2 * np.sqrt(np.log(2)))
+        self._peaks = [(a / 2, cutoff * np.pi / (l * self.pixel_pitch)) for a, l in peaks]
 
 
 class SK2048U3(Camera):
