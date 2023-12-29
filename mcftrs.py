@@ -8,7 +8,7 @@ from os.path import splitext
 from scipy import fft, signal
 from time import sleep, perf_counter
 from themes import Tk, Frame, Label, Entry, Button, OptionMenu
-from camera import DummyCam, SK2048U3, TCE1304U
+from camera import DummyCam, ZL41Wave, SK2048U3, TCE1304U
 
 
 class Updater(Thread):
@@ -17,14 +17,14 @@ class Updater(Thread):
         self.camera = None
         self.cameras = {}
 
-        for camera in [SK2048U3, TCE1304U]:
+        for camera in [ZL41Wave, SK2048U3, TCE1304U]:
             try:
                 self.cameras[camera.__name__] = camera()
             except: pass
 
+        self.cameras['2048x6.5um']  = DummyCam(2048, 6.5)
         self.cameras['2048x14um']  = DummyCam(2048, 14)
         self.cameras['3648x8.0um'] = DummyCam(3648, 8)
-        self.cameras['8192x3.5um'] = DummyCam(8192, 3.5)
 
         self.raw_data = []
         self.fft_data = []
@@ -87,7 +87,7 @@ class Plotter(FigureCanvasTkAgg):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.logscale = True
+        self.logscale = False
         self.pixel_count = 2
         self.pixel_pitch = 14336
         self.λ_min = 1
@@ -137,8 +137,8 @@ class Plotter(FigureCanvasTkAgg):
         if self.logscale:
             self.ax2.set_yscale('log')
             self.ax3.set_yscale('log')
-            self.ax2.set_ylim(1e-5, 1)
-            self.ax3.set_ylim(1e-5, 1)
+            self.ax2.set_ylim(1e-6, 1)
+            self.ax3.set_ylim(1e-6, 1)
         else:
             self.ax2.set_yscale('linear')
             self.ax3.set_yscale('linear')
@@ -205,11 +205,13 @@ class App(Tk):
         self.protocol('WM_DELETE_WINDOW', self.quit)
 
         self.plotter = Plotter(Figure(), self)
-        self.plotter.get_tk_widget().pack()
+        self.plotter.get_tk_widget().pack(side='top')
         self.updater = Updater()
         self.updater.start()
         self.controls = Frame(self)
         self.controls.pack(fill='x', side='bottom')
+        self.aoi_controls = Frame(self.controls)
+        self.dummy_controls = Frame(self.controls)
 
         self.camera_type = tk.StringVar(self)
         self.accum_count = tk.IntVar(self, 1)
@@ -225,7 +227,6 @@ class App(Tk):
         exposure_time = Entry(self.controls, textvariable=self.exposure_time)
         λ_min = Entry(self.controls, textvariable=self.λ_min)
         λ_0 = Entry(self.controls, textvariable=self.λ_0)
-        dummy_signals = [Entry(self.controls, textvariable=x) for x in self.dummy_signals]
 
         Label(self.controls, text=' Camera:').pack(side='left')
         camera_type.pack(side='left', pady=3)
@@ -239,21 +240,9 @@ class App(Tk):
         λ_min.pack(side='left')
         Label(self.controls, text='nm  λ₀ =').pack(side='left')
         λ_0.pack(side='left')
-        Label(self.controls, text='nm,    Dummy:').pack(side='left')
-
-        for text, widget in zip(['A₁', 'λ₁', 'A₂', 'λ₂', 'A₃', 'λ₃', 'FWHM'], dummy_signals):
-            Label(self.controls, text=f' {text} =').pack(side='left')
-            widget.pack(side='left')
+        Label(self.controls, text='nm').pack(side='left')
 
         self.camera_type.trace('w', self.select_camera)
-        for event in ['<Return>', '<FocusOut>']:
-            accum_count.bind(event, self.set_accum_count)
-            camera_gain.bind(event, self.set_camera_gain)
-            exposure_time.bind(event, self.set_exposure_time)
-            λ_min.bind(event, self.set_axes)
-            λ_0.bind(event, self.set_axes)
-            for widget in dummy_signals:
-                widget.bind(event, self.set_dummy_signal)
 
         self.buttons = []
         self.buttons.append(Button(self.controls, text='Auto scale', command=self.plotter.auto_scale))
@@ -262,6 +251,34 @@ class App(Tk):
         self.buttons.append(Button(self.controls, text='Quit', command=self.quit))
         for button in reversed(self.buttons):
             button.pack(padx=2, pady=3, side='right')
+        Label(self.controls, text='  ').pack(side='right')
+
+        self.aoitop = tk.IntVar(self, 1008)
+        self.aoivbin = tk.IntVar(self, 32)
+        Label(self.aoi_controls, text='Area of Interest: ').pack(side='left')
+        Label(self.aoi_controls, text='y₀ =').pack(side='left')
+        aoitop = Entry(self.aoi_controls, textvariable=self.aoitop)
+        aoitop.pack(side='left')
+        Label(self.aoi_controls, text=' Δy =').pack(side='left')
+        aoivbin = Entry(self.aoi_controls, textvariable=self.aoivbin)
+        aoivbin.pack(side='left')
+
+        Label(self.dummy_controls, text='Dummy:').pack(side='left')
+        dummy_signals = [Entry(self.dummy_controls, textvariable=x) for x in self.dummy_signals]
+        for text, widget in zip(['A₁', 'λ₁', 'A₂', 'λ₂', 'A₃', 'λ₃', 'FWHM'], dummy_signals):
+            Label(self.dummy_controls, text=f' {text} =').pack(side='left')
+            widget.pack(side='left')
+
+        for event in ['<Return>', '<FocusOut>']:
+            accum_count.bind(event, self.set_accum_count)
+            camera_gain.bind(event, self.set_camera_gain)
+            exposure_time.bind(event, self.set_exposure_time)
+            λ_min.bind(event, self.set_axes)
+            λ_0.bind(event, self.set_axes)
+            aoitop.bind(event, self.set_area_of_interest)
+            aoivbin.bind(event, self.set_area_of_interest)
+            for widget in dummy_signals:
+                widget.bind(event, self.set_dummy_signal)
 
         self.set_axes(self.λ_min.get(), self.λ_0.get())
         self.set_dummy_signal()
@@ -273,6 +290,15 @@ class App(Tk):
     def select_camera(self, *args):
         self.updater.paused = True
         camera = self.updater.cameras[self.camera_type.get()]
+        if camera.is_dummy:
+            self.aoi_controls.forget()
+            self.dummy_controls.pack(side='right')
+        elif camera.cam:
+            self.dummy_controls.forget()
+            self.aoi_controls.pack(side='right')
+        else:
+            self.aoi_controls.forget()
+            self.dummy_controls.forget()
         self.title(self.title().split(' - ')[0] + ' - ' + str(camera))
         self.set_accum_count()
         self.plotter.set_axes(self.λ_min.get(), self.λ_0.get(), camera)
@@ -308,6 +334,11 @@ class App(Tk):
                 if self.λ_min.get() > 0 and self.λ_0.get() > 0 and self.λ_min.get() < self.λ_0.get():
                     self.set_dummy_signal()
                     self.plotter.set_axes(self.λ_min.get(), self.λ_0.get())
+        except tk.TclError: pass
+
+    def set_area_of_interest(self, *args):
+        try:
+            self.updater.camera.set_area_of_interest(self.aoitop.get(), self.aoivbin.get())
         except tk.TclError: pass
 
     def set_dummy_signal(self, *args):
