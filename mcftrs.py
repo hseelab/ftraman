@@ -1,5 +1,6 @@
 import numpy as np
 import tkinter as tk
+import matplotlib.cm as cm
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -45,8 +46,9 @@ class Updater(Thread):
         self.camera.set_camera_gain(camera_gain)
         self.camera.set_exposure_time(exposure_time)
 
-    def set_handler(self, handler, accum_count, pixel_count):
-        self.handler = handler
+    def set_handler(self, image_handler, spectrum_handler, accum_count, pixel_count):
+        self.image_handler = image_handler
+        self.spectrum_handler = spectrum_handler
         self.raw_data = np.zeros((accum_count, pixel_count))
         self.fft_data = np.zeros((accum_count, pixel_count*4))
 
@@ -67,16 +69,31 @@ class Updater(Thread):
                 continue
 
             raw_data = self.camera.get_frame()
-            fft_data = get_fft(raw_data)
+            if len(raw_data.shape) == 1:
+                fft_data = get_fft(raw_data)
 
-            if n >= len(self.raw_data): n = 0
-            if len(raw_data) == len(self.raw_data[n]):
-                self.raw_data[n] = raw_data
-                self.fft_data[n] = fft_data
-                y1 = np.average(self.raw_data, axis=0)
-                y2 = np.average(self.fft_data, axis=0)
-                self.handler(y1, y2)
-                n += 1
+                if n >= len(self.raw_data): n = 0
+                if len(raw_data) == len(self.raw_data[n]):
+                    self.raw_data[n] = raw_data
+                    self.fft_data[n] = fft_data
+                    y1 = np.average(self.raw_data, axis=0)
+                    y2 = np.average(self.fft_data, axis=0)
+                    self.spectrum_handler(y1, y2)
+                    n += 1
+            else:
+                self.image_handler(raw_data)
+
+
+class Image(FigureCanvasTkAgg):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.ax = self.figure.add_subplot()
+        self.image = self.ax.imshow(np.random.rand(1024, 2048), cmap=cm.gray)
+
+    def show(self, image):
+        self.image.set_data(image)
+        self.image.norm.autoscale([0, np.amax(image)])
+        self.draw()
 
 
 class Plotter(FigureCanvasTkAgg):
@@ -146,6 +163,8 @@ class Plotter(FigureCanvasTkAgg):
             self.ax3.set_ylim(-0.01, 1.01)
 
         self.ax1.set_ylim(-0.01, 1.01)
+#       self.ax1.set_xlim(9, 9.6)
+#       self.ax1.set_xticks(np.arange(9, 9.7, 0.05))
         self.ax1.set_xlim(-self.pixel_pitch * self.pixel_count / 2000, self.pixel_pitch * self.pixel_count / 2000)
         self.ax2.set_xlim(1e7, max(400, self.λ_min))
         self.ax4.set_xticks(np.arange(300, 1220, 2 if self.λ_0 < 600 else 5 if self.λ_0 < 900 else 10))
@@ -204,6 +223,7 @@ class App(Tk):
         self.title('Multi-channel Fourier Transform Raman Spectrometer')
         self.protocol('WM_DELETE_WINDOW', self.quit)
 
+        self.image = Image(Figure(), self)
         self.plotter = Plotter(Figure(), self)
         self.plotter.get_tk_widget().pack(side='top')
         self.updater = Updater()
@@ -262,6 +282,9 @@ class App(Tk):
         Label(self.aoi_controls, text=' Δy =').pack(side='left')
         aoivbin = Entry(self.aoi_controls, textvariable=self.aoivbin)
         aoivbin.pack(side='left')
+        Label(self.aoi_controls, text='  ').pack(side='left')
+        Button(self.aoi_controls, text='Image', command=self.show_image).pack(padx=2, pady=3, side='left')
+        Button(self.aoi_controls, text='Spectrum', command=self.show_spectrum).pack(padx=2, pady=3, side='left')
 
         Label(self.dummy_controls, text='Dummy:').pack(side='left')
         dummy_signals = [Entry(self.dummy_controls, textvariable=x) for x in self.dummy_signals]
@@ -287,20 +310,31 @@ class App(Tk):
         self.bind('<Control-s>', self.save_plot)
         self.bind('<Control-q>', self.quit)
 
+    def show_image(self):
+        self.plotter.get_tk_widget().forget()
+        self.updater.camera.set_area_of_interest(1, 512, 1024)
+        self.image.get_tk_widget().pack(side='top')
+
+    def show_spectrum(self):
+        self.image.get_tk_widget().forget()
+        self.updater.camera.set_area_of_interest(self.aoivbin.get(), self.aoitop.get(), 1)
+        self.plotter.get_tk_widget().pack(side='top')
+
     def select_camera(self, *args):
         self.updater.paused = True
         camera = self.updater.cameras[self.camera_type.get()]
+        self.title(self.title().split(' - ')[0] + ' - ' + str(camera))
+        self.set_accum_count()
         if camera.is_dummy:
             self.aoi_controls.forget()
             self.dummy_controls.pack(side='right')
         elif camera.cam:
             self.dummy_controls.forget()
             self.aoi_controls.pack(side='right')
+            camera.set_area_of_interest(32, 1008, 1)
         else:
             self.aoi_controls.forget()
             self.dummy_controls.forget()
-        self.title(self.title().split(' - ')[0] + ' - ' + str(camera))
-        self.set_accum_count()
         self.plotter.set_axes(self.λ_min.get(), self.λ_0.get(), camera)
         self.updater.set_camera(camera, self.camera_gain.get(), self.exposure_time.get())
         self.updater.paused = False
@@ -311,7 +345,7 @@ class App(Tk):
             camera = self.updater.cameras.get(self.camera_type.get())
             if camera != self.updater.camera or accum_count > 0 and accum_count != len(self.updater.raw_data):
                 if camera:
-                    self.updater.set_handler(self.plotter.set_data, accum_count, camera.pixel_count)
+                    self.updater.set_handler(self.image.show, self.plotter.set_data, accum_count, camera.pixel_count)
         except tk.TclError: pass
 
     def set_camera_gain(self, *args):
@@ -338,7 +372,7 @@ class App(Tk):
 
     def set_area_of_interest(self, *args):
         try:
-            self.updater.camera.set_area_of_interest(self.aoitop.get(), self.aoivbin.get())
+            self.updater.camera.set_area_of_interest(self.aoivbin.get(), self.aoitop.get(), 1)
         except tk.TclError: pass
 
     def set_dummy_signal(self, *args):
@@ -398,4 +432,6 @@ class App(Tk):
 
 
 if __name__ == '__main__':
-    App().mainloop()
+    app = App()
+    app.geometry("1600x993")
+    app.mainloop()
