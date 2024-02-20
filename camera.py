@@ -21,6 +21,9 @@ class Camera(object):
     def set_exposure_time(self, exposure_time):
         self.exposure_time = exposure_time
 
+    def set_aoi(self, *args):
+        pass
+
     def close_camera(self):
         pass
 
@@ -43,7 +46,7 @@ class DummyCam(Camera):
         y = np.random.rand(self.pixel_count) - 0.5
         for a, k in self._peaks:
             y += self.camera_gain * a * (1 + np.cos(k*x)) * np.exp(-x**2/self._sigma**2)
-        return np.minimum(1, y/100)
+        return np.minimum(1, y/100).reshape(1, self.pixel_count)
 
     def set_dummy_signal(self, cutoff, *peaks, fwhm=0.5):
         self._sigma = fwhm * self.pixel_pitch * self.pixel_count / (2 * np.sqrt(np.log(2)))
@@ -108,7 +111,7 @@ class SK2048U3(Camera):
             result = self._dll.SK_GRAB(self._camera_id, data_p, c_size_t(1), c_size_t(1000), c_bool(0), 0, 0)
             if result != 15:
                 raise RuntimeError(f'Data read error! SK2048U3')
-            return data[0::2]/4096 + data[1::2]/16
+            return (data[0::2]/4096 + data[1::2]/16).reshape(1, self.pixel_count)
 
     def close_camera(self):
         with self.lock:
@@ -169,7 +172,7 @@ class TCE1304U(Camera):
             if data[3833] != self._exposure_time:
                 raise RuntimeError('Data read error! TCE1304U')
             dark_current = np.average(data[16:29])
-            return (data[32:3680] - dark_current)/ 65536
+            return ((data[32:3680] - dark_current)/ 65536).reshape(1, self.pixel_count)
 
 
 class ZL41Wave(Camera):
@@ -186,9 +189,9 @@ class ZL41Wave(Camera):
         self.cam.SensorCooling = True
 
         self.cam.AOIHBin = 1
-        self.cam.AOIVBin = 32
+        self.cam.AOIVBin = 1
         self.cam.AOIWidth = self.cam.max_AOIWidth
-        self.cam.AOIHeight = 1
+        self.cam.AOIHeight = 32
         self.cam.TriggerMode = 'Software'
         self.cam.CycleMode = 'Continuous'
         self.cam.PixelReadoutRate = '100 MHz'
@@ -218,20 +221,16 @@ class ZL41Wave(Camera):
             self.cam.ExposureTime = exposure_time / 1000
             self.cam.AcquisitionStart()
 
-    def set_area_of_interest(self, vbin, top, height):
+    def set_aoi(self, top, vbin, height):
         with self.lock:
             if self.cam.CameraAcquiring:
                 self.cam.AcquisitionStop()
                 self.cam.flush()
-            if vbin < self.cam.min_AOIVBin: vbin = self.cam.min_AOIVBin
-            if vbin > self.cam.max_AOIVBin: vbin = self.cam.max_AOIVBin
-            self.cam.AOIVBin = vbin
-            if top < self.cam.min_AOITop: top = self.cam.min_AOITop
-            if top > self.cam.max_AOITop: top = self.cam.max_AOITop
-            self.cam.AOITop = top
-            if height < self.cam.min_AOIHeight: height = self.cam.min_AOIHeight
-            if height > self.cam.max_AOIHeight: height = self.cam.max_AOIHeight
-            self.cam.AOIHeight = height
+            top = 1024 - (height+1)//2 - top
+            height = height // vbin
+            self.cam.AOITop = max(min(top, self.cam.max_AOITop), self.cam.min_AOITop)
+            self.cam.AOIVBin = max(min(vbin, self.cam.max_AOIVBin), self.cam.min_AOIVBin)
+            self.cam.AOIHeight = max(min(height, self.cam.max_AOIHeight), self.cam.min_AOIHeight)
             self.cam.AcquisitionStart()
 
     def get_frame(self):
@@ -240,10 +239,7 @@ class ZL41Wave(Camera):
             self.cam.queue(que, self.cam.ImageSizeBytes)
             self.cam.SoftwareTrigger()
             acq = self.cam.wait_buffer(2000)
-            if self.cam.AOIHeight == 1:
-                return (acq.image[0]-100.0) / 65535.0
-            else:
-                return (acq.image-100.0) / 65535.0
+            return (acq.image-100.0) / 65535.0
 
     def close_camera(self):
         with self.lock:

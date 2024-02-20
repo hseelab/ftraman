@@ -15,6 +15,8 @@ from camera import DummyCam, ZL41Wave, SK2048U3, TCE1304U
 class Updater(Thread):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.paused = True
+        self.running = True
         self.camera = None
         self.cameras = {}
 
@@ -23,74 +25,35 @@ class Updater(Thread):
                 self.cameras[camera.__name__] = camera()
             except: pass
 
-        self.cameras['2048x6.5um']  = DummyCam(2048, 6.5)
-        self.cameras['2048x14um']  = DummyCam(2048, 14)
+        self.cameras['2048x6.5um'] = DummyCam(2048, 6.5)
+        self.cameras['2048x14um' ] = DummyCam(2048, 14)
         self.cameras['3648x8.0um'] = DummyCam(3648, 8)
-
-        self.raw_data = []
-        self.fft_data = []
-        self.paused = True
-        self.running = True
 
     def close(self):
         for camera in self.cameras.values():
             camera.close_camera()
-
-    def set_dummy_signal(self, *peaks, fwhm=0.5):
-        for camera in self.cameras.values():
-            if camera.is_dummy:
-                camera.set_dummy_signal(*peaks, fwhm=fwhm)
 
     def set_camera(self, camera, camera_gain, exposure_time):
         self.camera = camera
         self.camera.set_camera_gain(camera_gain)
         self.camera.set_exposure_time(exposure_time)
 
-    def set_handler(self, image_handler, spectrum_handler, accum_count, pixel_count):
-        self.image_handler = image_handler
-        self.spectrum_handler = spectrum_handler
-        self.raw_data = np.zeros((accum_count, pixel_count))
-        self.fft_data = np.zeros((accum_count, pixel_count*4))
-
     def run(self):
-        def cut_below(data, λ_min):
-            data_fft = fft.rfft(data)
-            data_fft[:int(len(data)/(2*λ_min))] = 0
-            data_ifft = np.real(fft.irfft(data_fft))
-            return data_ifft
-
-        def get_fft(data):
-            return 7.5 * np.abs(fft.fft(np.pad(data, (0, 7*len(data))))[1:1+4*len(data)]) / len(data)
-
-        n = 0
         while self.running:
             if self.paused or not self.camera:
                 sleep(0.01)
-                continue
-
-            raw_data = self.camera.get_frame()
-            if len(raw_data.shape) == 1:
-                fft_data = get_fft(raw_data)
-
-                if n >= len(self.raw_data): n = 0
-                if len(raw_data) == len(self.raw_data[n]):
-                    self.raw_data[n] = raw_data
-                    self.fft_data[n] = fft_data
-                    y1 = np.average(self.raw_data, axis=0)
-                    y2 = np.average(self.fft_data, axis=0)
-                    self.spectrum_handler(y1, y2)
-                    n += 1
             else:
-                self.image_handler(raw_data)
+                self.handler(self.camera.get_frame())
 
 
 class Image(FigureCanvasTkAgg):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.ax = self.figure.add_subplot()
-        self.image = self.ax.imshow(np.random.rand(1024, 2048), cmap=cm.gray)
+        self.image = self.ax.imshow(np.random.rand(1024, 2048), aspect='auto', cmap=cm.gray)
+        self.image.set_extent((-1024, 1024, -512, 512))
 
-    def show(self, image):
+    def set_data(self, image):
         self.image.set_data(image)
         self.image.norm.autoscale([0, np.amax(image)])
         self.draw()
@@ -163,8 +126,6 @@ class Plotter(FigureCanvasTkAgg):
             self.ax3.set_ylim(-0.01, 1.01)
 
         self.ax1.set_ylim(-0.01, 1.01)
-#       self.ax1.set_xlim(9, 9.6)
-#       self.ax1.set_xticks(np.arange(9, 9.7, 0.05))
         self.ax1.set_xlim(-self.pixel_pitch * self.pixel_count / 2000, self.pixel_pitch * self.pixel_count / 2000)
         self.ax2.set_xlim(1e7, max(400, self.λ_min))
         self.ax4.set_xticks(np.arange(300, 1220, 2 if self.λ_0 < 600 else 5 if self.λ_0 < 900 else 10))
@@ -173,11 +134,11 @@ class Plotter(FigureCanvasTkAgg):
         self.background = self.copy_from_bbox(self.figure.bbox)
 
     def auto_scale(self, *args):
-        ymax = min(1.2 * max(np.max(np.abs(self.line1.get_ydata())), 1e-3), 1)
+        ymax = min(1.2 * max(np.max(np.abs(self.line1.get_ydata())), 1e-5), 1)
         self.ax1.set_ylim(-0.01 * ymax, 1.01 * ymax)
 
         data = self.line2.get_ydata()
-        ymax = max(np.max(data[len(data)//2:]), 1e-3)
+        ymax = max(np.max(data[len(data)//2:]), 1e-5)
 
         if self.logscale:
             ymin = max(np.min(data[len(data)//2:]), 1e-7)
@@ -195,19 +156,44 @@ class Plotter(FigureCanvasTkAgg):
         self.ax3.draw_artist(self.line3)
         self.blit(self.figure.bbox)
 
-    def set_data(self, y1, y2):
-        x1 = (0.5 + np.arange(-len(y1)//2, len(y1)//2)) * self.pixel_pitch / 1000
-        x2 = 1/np.linspace(1/(len(y2)*self.λ_min), 2/self.λ_min, 2*len(y2))[:len(y2)]
-        x3 = self._raman(x2)
-        self.line1.set_data(x1, y1)
-        self.line2.set_data(x2, y2)
-        self.line3.set_data(x3, y2)
+    def set_accum_count(self, accum_count):
+        self.index = 0
+        self.raw_data = np.zeros((accum_count, self.pixel_count))
+        self.fft_data = np.zeros((accum_count, self.pixel_count*4))
 
-        self.restore_region(self.background)
-        self.ax1.draw_artist(self.line1)
-        self.ax2.draw_artist(self.line2)
-        self.ax3.draw_artist(self.line3)
-        self.blit(self.figure.bbox)
+    def fft(self, data):
+        size = data.shape[1]
+        data = np.pad(data, ((0, 0), (0, 7*size)))
+        data = fft.fft(data)[:,1:1+4*size]
+        return 7.5 * np.abs(data) / size
+
+    def set_data(self, data):
+        raw_data = np.sum(data, axis=0)
+        fft_data = np.sum(self.fft(data), axis=0)
+
+        if self.index >= len(self.raw_data):
+            self.index = 0
+
+        if len(raw_data) == len(self.raw_data[self.index]):
+            self.raw_data[self.index] = raw_data
+            self.fft_data[self.index] = fft_data
+            self.index += 1
+
+            y1 = np.average(self.raw_data, axis=0)
+            y2 = np.average(self.fft_data, axis=0)
+            x1 = (0.5 + np.arange(-len(y1)//2, len(y1)//2)) * self.pixel_pitch / 1000
+            x2 = 1/np.linspace(1/(len(y2)*self.λ_min), 2/self.λ_min, 2*len(y2))[:len(y2)]
+            x3 = self._raman(x2)
+
+            self.line1.set_data(x1, y1)
+            self.line2.set_data(x2, y2)
+            self.line3.set_data(x3, y2)
+
+            self.restore_region(self.background)
+            self.ax1.draw_artist(self.line1)
+            self.ax2.draw_artist(self.line2)
+            self.ax3.draw_artist(self.line3)
+            self.blit(self.figure.bbox)
 
     def get_data(self):
         x1 = self.line1.get_xdata()
@@ -236,7 +222,7 @@ class App(Tk):
         self.camera_type = tk.StringVar(self)
         self.accum_count = tk.IntVar(self, 1)
         self.camera_gain = tk.DoubleVar(self, 20)
-        self.exposure_time = tk.DoubleVar(self, 1)
+        self.exposure_time = tk.DoubleVar(self, 20)
         self.λ_min = tk.DoubleVar(self, 500)
         self.λ_0   = tk.DoubleVar(self, 532)
         self.dummy_signals = [tk.DoubleVar(self, x) for x in (0.01, 518, 1, 532, 0.1, 547, 0.4)]
@@ -273,15 +259,19 @@ class App(Tk):
             button.pack(padx=2, pady=3, side='right')
         Label(self.controls, text='  ').pack(side='right')
 
-        self.aoitop = tk.IntVar(self, 1008)
-        self.aoivbin = tk.IntVar(self, 32)
-        Label(self.aoi_controls, text='Area of Interest: ').pack(side='left')
-        Label(self.aoi_controls, text='y₀ =').pack(side='left')
+        self.aoitop = tk.IntVar(self, 0)
+        self.aoivbin = tk.IntVar(self, 1)
+        self.aoiheight = tk.IntVar(self, 1024)
+        Label(self.aoi_controls, text='AOI:').pack(side='left')
+        Label(self.aoi_controls, text=' y₀ =').pack(side='left')
         aoitop = Entry(self.aoi_controls, textvariable=self.aoitop)
         aoitop.pack(side='left')
-        Label(self.aoi_controls, text=' Δy =').pack(side='left')
+        Label(self.aoi_controls, text=' Δy₁ =').pack(side='left')
         aoivbin = Entry(self.aoi_controls, textvariable=self.aoivbin)
         aoivbin.pack(side='left')
+        Label(self.aoi_controls, text=' Δy₂ =').pack(side='left')
+        aoiheight = Entry(self.aoi_controls, textvariable=self.aoiheight)
+        aoiheight.pack(side='left')
         Label(self.aoi_controls, text='  ').pack(side='left')
         Button(self.aoi_controls, text='Image', command=self.show_image).pack(padx=2, pady=3, side='left')
         Button(self.aoi_controls, text='Spectrum', command=self.show_spectrum).pack(padx=2, pady=3, side='left')
@@ -298,8 +288,9 @@ class App(Tk):
             exposure_time.bind(event, self.set_exposure_time)
             λ_min.bind(event, self.set_axes)
             λ_0.bind(event, self.set_axes)
-            aoitop.bind(event, self.set_area_of_interest)
-            aoivbin.bind(event, self.set_area_of_interest)
+            aoitop.bind(event, self.set_aoi)
+            aoivbin.bind(event, self.set_aoi)
+            aoiheight.bind(event, self.set_aoi)
             for widget in dummy_signals:
                 widget.bind(event, self.set_dummy_signal)
 
@@ -312,30 +303,33 @@ class App(Tk):
 
     def show_image(self):
         self.plotter.get_tk_widget().forget()
-        self.updater.camera.set_area_of_interest(1, 512, 1024)
         self.image.get_tk_widget().pack(side='top')
+        self.updater.handler = self.image.set_data
+        self.set_aoi()
 
     def show_spectrum(self):
         self.image.get_tk_widget().forget()
-        self.updater.camera.set_area_of_interest(self.aoivbin.get(), self.aoitop.get(), 1)
         self.plotter.get_tk_widget().pack(side='top')
+        self.updater.handler = self.plotter.set_data
+        self.set_aoi()
 
     def select_camera(self, *args):
         self.updater.paused = True
         camera = self.updater.cameras[self.camera_type.get()]
         self.title(self.title().split(' - ')[0] + ' - ' + str(camera))
-        self.set_accum_count()
+        self.updater.handler = self.plotter.set_data
         if camera.is_dummy:
             self.aoi_controls.forget()
             self.dummy_controls.pack(side='right')
         elif camera.cam:
             self.dummy_controls.forget()
             self.aoi_controls.pack(side='right')
-            camera.set_area_of_interest(32, 1008, 1)
+            self.set_aoi()
         else:
             self.aoi_controls.forget()
             self.dummy_controls.forget()
         self.plotter.set_axes(self.λ_min.get(), self.λ_0.get(), camera)
+        self.set_accum_count()
         self.updater.set_camera(camera, self.camera_gain.get(), self.exposure_time.get())
         self.updater.paused = False
 
@@ -343,9 +337,9 @@ class App(Tk):
         try:
             accum_count = self.accum_count.get()
             camera = self.updater.cameras.get(self.camera_type.get())
-            if camera != self.updater.camera or accum_count > 0 and accum_count != len(self.updater.raw_data):
+            if camera != self.updater.camera or accum_count > 0 and accum_count != len(self.plotter.raw_data):
                 if camera:
-                    self.updater.set_handler(self.image.show, self.plotter.set_data, accum_count, camera.pixel_count)
+                    self.plotter.set_accum_count(accum_count)
         except tk.TclError: pass
 
     def set_camera_gain(self, *args):
@@ -370,15 +364,26 @@ class App(Tk):
                     self.plotter.set_axes(self.λ_min.get(), self.λ_0.get())
         except tk.TclError: pass
 
-    def set_area_of_interest(self, *args):
+    def set_aoi(self, *args):
         try:
-            self.updater.camera.set_area_of_interest(self.aoivbin.get(), self.aoitop.get(), 1)
+            if self.updater.camera:
+                vbin = max(1, min(2048, self.aoivbin.get()))
+                height = max(((vbin+7) // vbin) * vbin, (min(2048, self.aoiheight.get()) // vbin) * vbin)
+                top = max(height//2-1024, min(1024-(height+1)//2, self.aoitop.get()))
+                self.aoitop.set(top)
+                self.aoivbin.set(vbin)
+                self.aoiheight.set(height)
+                self.image.image.set_extent((-1024, 1024, top-height//2, top+(height+1)//2))
+                self.updater.camera.set_aoi(top, vbin, height)
         except tk.TclError: pass
 
     def set_dummy_signal(self, *args):
         try:
+            λ_min = self.λ_min.get()
             s = [s.get() for s in self.dummy_signals]
-            self.updater.set_dummy_signal(self.λ_min.get(), (s[0], s[1]), (s[2], s[3]), (s[4], s[5]), fwhm=s[6])
+            for camera in self.updater.cameras.values():
+                if camera.is_dummy:
+                    camera.set_dummy_signal(λ_min, (s[0], s[1]), (s[2], s[3]), (s[4], s[5]), fwhm=s[6])
         except tk.TclError: pass
 
     def toggle_logscale(self, *args):
