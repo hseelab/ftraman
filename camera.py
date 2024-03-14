@@ -5,24 +5,22 @@ from threading import Lock
 from usb.core import find
 from ctypes import cdll, create_string_buffer, create_unicode_buffer, POINTER
 from ctypes import c_wchar, c_wchar_p, c_bool, c_int, c_uint8, c_size_t, c_double
+from pylablib.devices import Andor
 from pyAndorSDK3 import AndorSDK3
-
-SKDLLPATH = 'C:/Program Files/Common Files/SK/SK91USB3-WIN/SK91USB3_x64u.dll'
 
 
 class Camera(object):
+    cam = None
     is_dummy = False
     camera_gain = 0
     exposure_time = 10
+    get_temperature = None
 
     def set_camera_gain(self, camera_gain):
         self.camera_gain = camera_gain
 
     def set_exposure_time(self, exposure_time):
         self.exposure_time = exposure_time
-
-    def set_aoi(self, *args):
-        pass
 
     def close_camera(self):
         pass
@@ -53,71 +51,6 @@ class DummyCam(Camera):
         self._peaks = [(a / 2, cutoff * np.pi / (l * self.pixel_pitch)) for a, l in peaks]
 
 
-class SK2048U3(Camera):
-    '''
-    Schafter Kirchhoff USB 3.0 CMOS Line Scan Camera
-    The camera driver software can be downloaded from
-    https://www.sukhamburg.com/products/details/SKLineScan
-    '''
-    def __init__(self):
-        self.lock = Lock()
-        self._camera_id = 0
-        self._channel = 0
-        self._dll = cdll.LoadLibrary(SKDLLPATH)
-        self._dll.SK_LOADDLL()
-        if self._dll.SK_INITCAMERA(self._camera_id):
-            raise RuntimeError('Camera not found!')
-
-        self._dll.SK_GETPIXWIDTH.restype = c_double
-        self._dll.SK_GETEXPOSURETIME.restype = c_double
-        self._dll.SK_GETLINEFREQUENCY.restype = c_double
-        self._dll.SK_GETMINLINEFREQUENCY.restype = c_double
-        self._dll.SK_GETMAXLINEFREQUENCY.restype = c_double
-        self.pixel_pitch = self._dll.SK_GETPIXWIDTH(self._camera_id)
-        self.pixel_count = self._dll.SK_GETPIXELSPERLINE(self._camera_id)
-        self.min_exposure_time = 1 / self._dll.SK_GETMAXLINEFREQUENCY(self._camera_id)
-        self.max_exposure_time = 1 / self._dll.SK_GETMINLINEFREQUENCY(self._camera_id)
-
-    def __str__(self):
-        with self.lock:
-            self._dll.SK_GETCAMTYPE.restype = POINTER(c_wchar)
-            camera_type = c_wchar_p.from_buffer(self._dll.SK_GETCAMTYPE(self._camera_id))
-            camera_sn = create_unicode_buffer(12)
-            usb_version = create_unicode_buffer(12)
-            self._dll.SK_GETSN(self._camera_id, camera_sn, 12)
-            self._dll.SK_GETUSBVERSION(self._camera_id, usb_version, 12)
-            return f'<Camera: {camera_type.value}, Serial: {camera_sn.value}, Interface: {usb_version.value}>'
-
-    def set_camera_gain(self, camera_gain):
-        with self.lock:
-            if camera_gain != self.camera_gain:
-                self.camera_gain = camera_gain
-                if self._dll.SK_SETGAIN(self._camera_id, int(10.23*camera_gain), self._channel):
-                    raise RuntimeError('Command write error! SK2048U3')
-
-    def set_exposure_time(self, exposure_time):
-        with self.lock:
-            if exposure_time < self.min_exposure_time: exposure_time = self.min_exposure_time
-            if exposure_time > self.max_exposure_time: exposure_time = self.max_exposure_time
-            if exposure_time != self.exposure_time:
-                self.exposure_time = exposure_time
-                if self._dll.SK_SETEXPOSURETIME(self._camera_id, c_double(self.exposure_time)):
-                    raise RuntimeError('Command write error! SK2048U3')
-
-    def get_frame(self):
-        with self.lock:
-            data = np.zeros(2*self.pixel_count, dtype=np.uint8)
-            data_p = data.ctypes.data_as(POINTER(c_uint8))
-            result = self._dll.SK_GRAB(self._camera_id, data_p, c_size_t(1), c_size_t(1000), c_bool(0), 0, 0)
-            if result != 15:
-                raise RuntimeError(f'Data read error! SK2048U3')
-            return (data[0::2]/4096 + data[1::2]/16).reshape(1, self.pixel_count)
-
-    def close_camera(self):
-        with self.lock:
-            self._dll.SK_CLOSECAMERA(self._camera_id)
-
-
 class TCE1304U(Camera):
     '''
     Mightex USB 2.0 CCD Line Scan Camera
@@ -130,10 +63,10 @@ class TCE1304U(Camera):
         self.pixel_count = 3648
         self.min_exposure_time = 0.1
         self.max_exposure_time = 1000
-        self._dev = find(idVendor=0x04B4, idProduct=0x0328)
-        if not self._dev:
+        self.dev = find(idVendor=0x04B4, idProduct=0x0328)
+        if not self.dev:
             raise RuntimeError('Camera not found!')
-        self._dev.set_configuration()
+        self.dev.set_configuration()
 
     def __str__(self):
         with self.lock:
@@ -142,13 +75,13 @@ class TCE1304U(Camera):
             return f'<Camera: {info[1:11]}, Serial: {info[15:28]}, Date: {info[29:39]}>'
 
     def _read(self, size):
-        result = self._dev.read(0x81, size+2)
+        result = self.dev.read(0x81, size+2)
         if result[0] != 1 or result[1] != size:
             raise RuntimeError('Command read error! TCE1304U')
         return result[2:]
 
     def _write(self, cmd, *data):
-        result = self._dev.write(0x01, bytes([cmd, len(data)] + list(data)))
+        result = self.dev.write(0x01, bytes([cmd, len(data)] + list(data)))
         if result != len(data)+2:
             raise RuntimeError('Command write error! TCE1304U')
 
@@ -168,11 +101,131 @@ class TCE1304U(Camera):
     def get_frame(self):
         with self.lock:
             self._write(0x34, 1)
-            data = np.frombuffer(self._dev.read(0x82, 7680), '<u2')
+            data = np.frombuffer(self.dev.read(0x82, 7680), '<u2')
             if data[3833] != self._exposure_time:
                 raise RuntimeError('Data read error! TCE1304U')
             dark_current = np.average(data[16:29])
             return ((data[32:3680] - dark_current)/ 65536).reshape(1, self.pixel_count)
+
+
+class SK2048U3(Camera):
+    '''
+    Schafter Kirchhoff USB 3.0 CMOS Line Scan Camera
+    The camera driver software can be downloaded from
+    https://www.sukhamburg.com/products/details/SKLineScan
+    '''
+    def __init__(self):
+        self.lock = Lock()
+        self._camera_id = 0
+        self._channel = 0
+        self.dev = cdll.LoadLibrary('C:/Program Files/Common Files/SK/SK91USB3-WIN/SK91USB3_x64u.dll')
+        self.dev.SK_LOADDLL()
+        if self.dev.SK_INITCAMERA(self._camera_id):
+            raise RuntimeError('Camera not found!')
+
+        self.dev.SK_GETPIXWIDTH.restype = c_double
+        self.dev.SK_GETEXPOSURETIME.restype = c_double
+        self.dev.SK_GETLINEFREQUENCY.restype = c_double
+        self.dev.SK_GETMINLINEFREQUENCY.restype = c_double
+        self.dev.SK_GETMAXLINEFREQUENCY.restype = c_double
+        self.pixel_pitch = self.dev.SK_GETPIXWIDTH(self._camera_id)
+        self.pixel_count = self.dev.SK_GETPIXELSPERLINE(self._camera_id)
+        self.min_exposure_time = 1 / self.dev.SK_GETMAXLINEFREQUENCY(self._camera_id)
+        self.max_exposure_time = 1 / self.dev.SK_GETMINLINEFREQUENCY(self._camera_id)
+
+    def __str__(self):
+        with self.lock:
+            self.dev.SK_GETCAMTYPE.restype = POINTER(c_wchar)
+            camera_type = c_wchar_p.from_buffer(self.dev.SK_GETCAMTYPE(self._camera_id))
+            camera_sn = create_unicode_buffer(12)
+            usb_version = create_unicode_buffer(12)
+            self.dev.SK_GETSN(self._camera_id, camera_sn, 12)
+            self.dev.SK_GETUSBVERSION(self._camera_id, usb_version, 12)
+            return f'<Camera: {camera_type.value}, Serial: {camera_sn.value}, Interface: {usb_version.value}>'
+
+    def set_camera_gain(self, camera_gain):
+        with self.lock:
+            if camera_gain != self.camera_gain:
+                self.camera_gain = camera_gain
+                if self.dev.SK_SETGAIN(self._camera_id, int(10.23*camera_gain), self._channel):
+                    raise RuntimeError('Command write error! SK2048U3')
+
+    def set_exposure_time(self, exposure_time):
+        with self.lock:
+            if exposure_time < self.min_exposure_time: exposure_time = self.min_exposure_time
+            if exposure_time > self.max_exposure_time: exposure_time = self.max_exposure_time
+            if exposure_time != self.exposure_time:
+                self.exposure_time = exposure_time
+                if self.dev.SK_SETEXPOSURETIME(self._camera_id, c_double(self.exposure_time)):
+                    raise RuntimeError('Command write error! SK2048U3')
+
+    def get_frame(self):
+        with self.lock:
+            data = np.zeros(2*self.pixel_count, dtype=np.uint8)
+            data_p = data.ctypes.data_as(POINTER(c_uint8))
+            result = self.dev.SK_GRAB(self._camera_id, data_p, c_size_t(1), c_size_t(1000), c_bool(0), 0, 0)
+            if result != 15:
+                raise RuntimeError(f'Data read error! SK2048U3')
+            return (data[0::2]/4096 + data[1::2]/16).reshape(1, self.pixel_count)
+
+    def close_camera(self):
+        with self.lock:
+            self.dev.SK_CLOSECAMERA(self._camera_id)
+
+
+class DV420AOE(Camera):
+    '''
+    iDus DV420A-OE Camera
+    '''
+    def __init__(self):
+        self.lock = Lock()
+        self.pixel_pitch = 26
+        self.pixel_count = 1024
+        self.cam = Andor.AndorSDK2Camera()
+        self.cam.set_temperature(-65)
+        self.cam.set_fan_mode('full')
+        self.cam.setup_image_mode(0, 1024, 0, 255, 1, 1)
+        self.cam.set_acquisition_mode('cont')
+        self.cam.set_trigger_mode('software')
+        self.cam.start_acquisition()
+
+    def __str__(self):
+        return f'<{self.cam.get_device_info()}>'
+
+    def set_camera_gain(self, camera_gain):
+        self.camera_gain = camera_gain
+
+    def set_exposure_time(self, exposure_time):
+        with self.lock:
+            self.exposure_time = exposure_time
+            self.cam.set_exposure(exposure_time/1000)
+
+    def set_aoi(self, aoitop, aoibtm, aoibin):
+        with self.lock:
+            aoi = self.cam.setup_image_mode(0, 1024, aoitop, aoibtm, 1, aoibin)
+            return aoi[2], aoi[3], aoi[5]
+
+    def get_temperature(self):
+        return (round(self.cam.get_temperature(), 1),
+                round(self.cam.get_temperature_setpoint(), 1),
+                self.cam.get_temperature_status())
+
+    def set_temperature(self, temperature):
+        self.cam.set_temperature(temperature)
+
+    def get_frame(self):
+        with self.lock:
+            self.cam.send_software_trigger()
+            self.cam.wait_for_frame()
+            acq = self.cam.read_newest_image()
+            return (acq-100.0) / 65535.0
+
+    def close_camera(self):
+        with self.lock:
+            if self.cam.acquisition_in_progress():
+                self.cam.stop_acquisition()
+            self.cam.set_fan_mode('off')
+            self.cam.close()
 
 
 class ZL41Wave(Camera):
@@ -221,17 +274,20 @@ class ZL41Wave(Camera):
             self.cam.ExposureTime = exposure_time / 1000
             self.cam.AcquisitionStart()
 
-    def set_aoi(self, top, vbin, height):
+    def set_aoi(self, aoitop, aoibtm, aoibin):
         with self.lock:
             if self.cam.CameraAcquiring:
                 self.cam.AcquisitionStop()
                 self.cam.flush()
-            top = 1024 - (height+1)//2 - top
-            height = height // vbin
-            self.cam.AOITop = max(min(top, self.cam.max_AOITop), self.cam.min_AOITop)
-            self.cam.AOIVBin = max(min(vbin, self.cam.max_AOIVBin), self.cam.min_AOIVBin)
-            self.cam.AOIHeight = max(min(height, self.cam.max_AOIHeight), self.cam.min_AOIHeight)
+            height = (aoibtm - aoitop) // aoibin
+            self.cam.AOITop = min(max(aoitop, self.cam.min_AOITop), self.cam.max_AOITop)
+            self.cam.AOIVBin = min(max(aoibin, self.cam.min_AOIVBin), self.cam.max_AOIVBin)
+            self.cam.AOIHeight = min(max(height, self.cam.min_AOIHeight), self.cam.max_AOIHeight)
+            aoitop = self.cam.AOITop
+            aoibin = self.cam.AOIVBin
+            height = self.cam.AOIHeight
             self.cam.AcquisitionStart()
+            return aoitop, aoitop+height*aoibin, aoibin
 
     def get_frame(self):
         with self.lock:
@@ -250,6 +306,6 @@ class ZL41Wave(Camera):
 
 
 if __name__ == '__main__':
-    cam = ZL41Wave()
+    cam = DV420AOE()
     print(cam.get_frame())
     print(cam.get_frame())
