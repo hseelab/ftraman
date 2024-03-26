@@ -9,7 +9,7 @@ from os.path import splitext
 from scipy import fft, signal
 from time import sleep, perf_counter
 from themes import Tk, Frame, Label, Entry, Button, OptionMenu
-from camera import DummyCam, DV420AOE, SK2048U3, TCE1304U, ZL41Wave
+from camera import DummyCam, DV420, ZL41W, SK2048, TCE1304
 
 
 class Updater(Thread):
@@ -22,10 +22,14 @@ class Updater(Thread):
         self.ctemp = ctemp
         self.stemp = stemp
 
-        for camera in [DV420AOE, SK2048U3, TCE1304U, ZL41Wave]:
+        print('Detecting cameras ...')
+        for c in [DV420, ZL41W, SK2048, TCE1304]:
             try:
-                self.cameras[camera.__name__] = camera()
-            except: pass
+                print(c.__name__, end=' camera: ')
+                self.cameras[c.__name__] = c()
+                print('Detected!')
+            except:
+                print('Not detected!')
 
         self.cameras['1024x26um' ] = DummyCam(1024, 26)
         self.cameras['2048x6.5um'] = DummyCam(2048, 6.5)
@@ -36,19 +40,20 @@ class Updater(Thread):
         for camera in self.cameras.values():
             camera.close_camera()
 
-    def set_camera(self, camera, exposure_time, camera_gain):
+    def set_camera(self, camera, gain, exposure):
         self.camera = camera
-        self.camera.set_exposure_time(exposure_time)
-        self.camera.set_camera_gain(camera_gain)
+        self.camera.set_gain(gain)
+        self.camera.set_exposure(exposure)
         if self.camera.get_temperature:
             self.stemp.set(self.camera.get_temperature()[1])
 
     def run(self):
         while self.running:
-            if self.paused or not self.camera:
-                sleep(0.01)
-            else:
+            if not self.paused and self.camera:
                 self.handler(self.camera.get_frame())
+            else:
+                sleep(0.1)
+
             if self.camera and self.camera.get_temperature:
                 self.ctemp.set(self.camera.get_temperature()[0])
 
@@ -163,10 +168,10 @@ class Spectra(FigureCanvasTkAgg):
         self.ax3.draw_artist(self.line3)
         self.blit(self.figure.bbox)
 
-    def set_accum_count(self, accum_count):
+    def set_accum(self, accum):
         self.index = 0
-        self.raw_data = np.zeros((accum_count, self.pixel_count))
-        self.fft_data = np.zeros((accum_count, self.pixel_count*4))
+        self.raw_data = np.zeros((accum, self.pixel_count))
+        self.fft_data = np.zeros((accum, self.pixel_count*4))
 
     def fft(self, data):
         size = data.shape[1]
@@ -229,29 +234,29 @@ class App(Tk):
         self.dummy_controls = Frame(self.controls)
 
         self.camera_type = tk.StringVar(self)
-        self.accum_count = tk.IntVar(self, 1)
-        self.exposure_time = tk.DoubleVar(self, 20)
-        self.camera_gain = tk.DoubleVar(self, 20)
+        self.accum = tk.IntVar(self, 1)
+        self.gain = tk.DoubleVar(self, 1)
+        self.exposure = tk.DoubleVar(self, 20)
         self.λ_min = tk.DoubleVar(self, 500)
         self.λ_0   = tk.DoubleVar(self, 532)
         self.dummy_signals = [tk.DoubleVar(self, x) for x in (0.01, 518, 1, 532, 0.1, 547, 0.4)]
 
         camera_type = OptionMenu(self.controls, self.camera_type, *self.updater.cameras.keys())
-        accum_count = Entry(self.controls, textvariable=self.accum_count)
-        exposure_time = Entry(self.controls, textvariable=self.exposure_time)
-        camera_gain = Entry(self.controls, textvariable=self.camera_gain)
+        accum = Entry(self.controls, textvariable=self.accum)
+        exposure = Entry(self.controls, textvariable=self.exposure)
+        gain = Entry(self.controls, textvariable=self.gain)
         λ_min = Entry(self.controls, textvariable=self.λ_min)
         λ_0 = Entry(self.controls, textvariable=self.λ_0)
 
         Label(self.controls, text=' Camera:').pack(side='left')
         camera_type.pack(side='left', pady=3)
         Label(self.controls, text=' Acc =').pack(side='left')
-        accum_count.pack(side='left')
-        Label(self.controls, text=' Exp =').pack(side='left')
-        exposure_time.pack(side='left')
+        accum.pack(side='left')
         Label(self.controls, text=' Gain =').pack(side='left')
-        camera_gain.pack(side='left')
-        Label(self.controls, text='ms, λₘᵢₙ =').pack(side='left')
+        gain.pack(side='left')
+        Label(self.controls, text=' Exp =').pack(side='left')
+        exposure.pack(side='left')
+        Label(self.controls, text=' λₘᵢₙ =').pack(side='left')
         λ_min.pack(side='left')
         Label(self.controls, text=' λ₀ =').pack(side='left')
         λ_0.pack(side='left')
@@ -259,6 +264,7 @@ class App(Tk):
         self.camera_type.trace('w', self.select_camera)
 
         self.buttons = []
+        self.buttons.append(Button(self.controls, text='Toggle plot', command=self.toggle_plot))
         self.buttons.append(Button(self.controls, text='Auto scale', command=self.spectra.auto_scale))
         self.buttons.append(Button(self.controls, text='Log/Linear', command=self.toggle_logscale))
         self.buttons.append(Button(self.controls, text='Save as...', command=self.save_plot))
@@ -267,27 +273,25 @@ class App(Tk):
             button.pack(padx=2, pady=3, side='right')
         Label(self.controls, text='  ').pack(side='right')
 
-        self.aoitop = tk.IntVar(self, 0)
-        self.aoibtm = tk.IntVar(self, 255)
-        self.aoibin = tk.IntVar(self, 1)
-        Label(self.camera_controls, text=' T = (').pack(side='left')
+        self.roitop = tk.IntVar(self, 0)
+        self.roibtm = tk.IntVar(self, 2047)
+        self.roibin = tk.IntVar(self, 1)
+        Label(self.camera_controls, text=' Tₛₑₙ = [').pack(side='left')
         ctemp = Entry(self.camera_controls, textvariable=self.ctemp)
         ctemp.pack(side='left')
         Label(self.camera_controls, text='/').pack(side='left')
         stemp = Entry(self.camera_controls, textvariable=self.stemp)
         stemp.pack(side='left')
-        Label(self.camera_controls, text='°C), y = (').pack(side='left')
-        aoitop = Entry(self.camera_controls, textvariable=self.aoitop)
-        aoitop.pack(side='left')
+        Label(self.camera_controls, text='°C], ROI = [').pack(side='left')
+        roitop = Entry(self.camera_controls, textvariable=self.roitop)
+        roitop.pack(side='left')
         Label(self.camera_controls, text=',').pack(side='left')
-        aoibtm = Entry(self.camera_controls, textvariable=self.aoibtm)
-        aoibtm.pack(side='left')
+        roibtm = Entry(self.camera_controls, textvariable=self.roibtm)
+        roibtm.pack(side='left')
         Label(self.camera_controls, text=',').pack(side='left')
-        aoibin = Entry(self.camera_controls, textvariable=self.aoibin)
-        aoibin.pack(side='left')
-        Label(self.camera_controls, text=') ').pack(side='left')
-        Button(self.camera_controls, text='Image', command=self.show_image).pack(padx=2, pady=3, side='left')
-        Button(self.camera_controls, text='Spectrum', command=self.show_spectrum).pack(padx=2, pady=3, side='left')
+        roibin = Entry(self.camera_controls, textvariable=self.roibin)
+        roibin.pack(side='left')
+        Label(self.camera_controls, text='] ').pack(side='left')
 
         Label(self.dummy_controls, text='Dummy:').pack(side='left')
         dummy_signals = [Entry(self.dummy_controls, textvariable=x) for x in self.dummy_signals]
@@ -296,15 +300,15 @@ class App(Tk):
             widget.pack(side='left')
 
         for event in ['<Return>', '<FocusOut>']:
-            accum_count.bind(event, self.set_accum_count)
-            exposure_time.bind(event, self.set_exposure_time)
-            camera_gain.bind(event, self.set_camera_gain)
+            accum.bind(event, self.set_accum)
+            gain.bind(event, self.set_gain)
+            exposure.bind(event, self.set_exposure)
             λ_min.bind(event, self.set_axes)
             λ_0.bind(event, self.set_axes)
             stemp.bind(event, self.set_temperature)
-            aoitop.bind(event, self.set_aoi)
-            aoibtm.bind(event, self.set_aoi)
-            aoibin.bind(event, self.set_aoi)
+            roitop.bind(event, self.set_roi)
+            roibtm.bind(event, self.set_roi)
+            roibin.bind(event, self.set_roi)
             for widget in dummy_signals:
                 widget.bind(event, self.set_dummy_signal)
 
@@ -315,17 +319,16 @@ class App(Tk):
         self.bind('<Control-s>', self.save_plot)
         self.bind('<Control-q>', self.quit)
 
-    def show_image(self):
-        self.spectra.get_tk_widget().forget()
-        self.image.get_tk_widget().pack(side='top')
-        self.updater.handler = self.image.set_data
-        self.set_aoi()
-
-    def show_spectrum(self):
-        self.image.get_tk_widget().forget()
-        self.spectra.get_tk_widget().pack(side='top')
-        self.updater.handler = self.spectra.set_data
-        self.set_aoi()
+    def toggle_plot(self):
+        if self.updater.handler != self.spectra.set_data:
+            self.image.get_tk_widget().forget()
+            self.spectra.get_tk_widget().pack(side='top')
+            self.updater.handler = self.spectra.set_data
+        else:
+            self.spectra.get_tk_widget().forget()
+            self.image.get_tk_widget().pack(side='top')
+            self.updater.handler = self.image.set_data
+        self.set_roi()
 
     def select_camera(self, *args):
         self.updater.paused = True
@@ -334,42 +337,43 @@ class App(Tk):
         if camera.is_dummy:
             self.camera_controls.forget()
             self.dummy_controls.pack(side='right')
-            self.show_spectrum()
         elif camera.cam:
             self.dummy_controls.forget()
             self.camera_controls.pack(side='right')
-            self.show_image()
         else:
             self.camera_controls.forget()
             self.dummy_controls.forget()
-            self.show_spectrum()
+
+        self.image.get_tk_widget().forget()
+        self.spectra.get_tk_widget().pack(side='top')
+        self.updater.handler = self.spectra.set_data
         self.spectra.set_axes(self.λ_min.get(), self.λ_0.get(), camera)
-        self.set_accum_count()
-        self.updater.set_camera(camera, self.exposure_time.get(), self.camera_gain.get())
-        self.set_aoi()
+        self.set_accum()
+        self.updater.set_camera(camera, self.gain.get(), self.exposure.get())
+        self.set_roi()
         self.updater.paused = False
 
-    def set_accum_count(self, *args):
+    def set_accum(self, *args):
         try:
-            accum_count = self.accum_count.get()
+            accum = self.accum.get()
             camera = self.updater.cameras.get(self.camera_type.get())
-            if camera != self.updater.camera or accum_count > 0 and accum_count != len(self.spectra.raw_data):
+            if camera != self.updater.camera or accum > 0 and accum != len(self.spectra.raw_data):
                 if camera:
-                    self.spectra.set_accum_count(accum_count)
+                    self.spectra.set_accum(accum)
         except tk.TclError: pass
 
-    def set_exposure_time(self, *args):
+    def set_gain(self, *args):
         try:
-            exposure_time = self.exposure_time.get()
-            if self.updater.camera and exposure_time != self.updater.camera.exposure_time:
-                self.updater.camera.set_exposure_time(self.exposure_time.get())
+            gain = self.gain.get()
+            if self.updater.camera and gain != self.updater.camera.gain:
+                self.updater.camera.set_gain(self.gain.get())
         except tk.TclError: pass
 
-    def set_camera_gain(self, *args):
+    def set_exposure(self, *args):
         try:
-            camera_gain = self.camera_gain.get()
-            if self.updater.camera and camera_gain != self.updater.camera.camera_gain:
-                self.updater.camera.set_camera_gain(self.camera_gain.get())
+            exposure = self.exposure.get()
+            if self.updater.camera and exposure != self.updater.camera.exposure:
+                self.updater.camera.set_exposure(self.exposure.get())
         except tk.TclError: pass
 
     def set_axes(self, event, *args):
@@ -386,18 +390,18 @@ class App(Tk):
                 self.updater.camera.set_temperature(self.stemp.get())
         except tk.TclError: pass
 
-    def set_aoi(self, *args):
+    def set_roi(self, *args):
         try:
             if self.updater.camera:
-                aoitop = self.aoitop.get()
-                aoibtm = self.aoibtm.get()
-                aoibin = self.aoibin.get()
+                roitop = self.roitop.get()
+                roibtm = self.roibtm.get()
+                roibin = self.roibin.get()
                 if self.updater.camera.cam:
-                    aoitop, aoibtm, aoibin = self.updater.camera.set_aoi(aoitop, aoibtm, aoibin)
-                    self.aoitop.set(aoitop)
-                    self.aoibtm.set(aoibtm)
-                    self.aoibin.set(aoibin)
-                self.image.image.set_extent((0, self.updater.camera.pixel_count, aoitop-0.5, aoibtm+0.5))
+                    roitop, roibtm, roibin = self.updater.camera.set_roi(roitop, roibtm, roibin)
+                    self.roitop.set(roitop)
+                    self.roibtm.set(roibtm)
+                    self.roibin.set(roibin)
+                self.image.image.set_extent((0, self.updater.camera.pixel_count, roitop-0.5, roibtm+0.5))
         except tk.TclError: pass
 
     def set_dummy_signal(self, *args):
@@ -461,5 +465,5 @@ class App(Tk):
 
 if __name__ == '__main__':
     app = App()
-    app.geometry("1600x993")
+    app.geometry("1600x993+310+0")
     app.mainloop()
